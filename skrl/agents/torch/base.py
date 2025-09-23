@@ -51,6 +51,7 @@ class Agent:
 
         self.device = config.torch.parse_device(device)
 
+        # multi memories can be used for more complex envs, e.g. multi-task learning, curriculum learning, data monitoring
         if type(memory) is list:
             self.memory = memory[0]
             self.secondary_memories = memory[1:]
@@ -317,7 +318,6 @@ class Agent:
             # check ended episodes
             finished_episodes = (terminated + truncated).nonzero(as_tuple=False)
             if finished_episodes.numel():
-
                 # storage cumulative rewards and timesteps
                 self._track_rewards.extend(self._cumulative_rewards[finished_episodes][:, 0].reshape(-1).tolist())
                 self._track_timesteps.extend(self._cumulative_timesteps[finished_episodes][:, 0].reshape(-1).tolist())

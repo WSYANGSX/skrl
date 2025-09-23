@@ -135,7 +135,9 @@ class PPO(Agent):
         self._rollout = 0
 
         self._grad_norm_clip = self.cfg["grad_norm_clip"]
+        # control the difference between the old and new strategy
         self._ratio_clip = self.cfg["ratio_clip"]
+        # Prevent the value function from being updated too quickly and maintain the stability of training
         self._value_clip = self.cfg["value_clip"]
         self._clip_predicted_values = self.cfg["clip_predicted_values"]
 
@@ -208,10 +210,14 @@ class PPO(Agent):
             self.memory.create_tensor(name="rewards", size=1, dtype=torch.float32)
             self.memory.create_tensor(name="terminated", size=1, dtype=torch.bool)
             self.memory.create_tensor(name="truncated", size=1, dtype=torch.bool)
-            self.memory.create_tensor(name="log_prob", size=1, dtype=torch.float32)
-            self.memory.create_tensor(name="values", size=1, dtype=torch.float32)
-            self.memory.create_tensor(name="returns", size=1, dtype=torch.float32)
-            self.memory.create_tensor(name="advantages", size=1, dtype=torch.float32)
+            self.memory.create_tensor(name="log_prob", size=1, dtype=torch.float32)  # the log prob of current action
+            self.memory.create_tensor(name="values", size=1, dtype=torch.float32)  # the output of value network
+            self.memory.create_tensor(
+                name="returns", size=1, dtype=torch.float32
+            )  # the cumulative discount return from current time step
+            self.memory.create_tensor(
+                name="advantages", size=1, dtype=torch.float32
+            )  # the degree of quality of performing a certain action in a certain state relative to the average action
 
             # tensors sampled during training
             self._tensors_names = ["states", "actions", "log_prob", "values", "returns", "advantages"]
@@ -447,9 +453,7 @@ class PPO(Agent):
                 sampled_returns,
                 sampled_advantages,
             ) in sampled_batches:
-
                 with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
-
                     sampled_states = self._state_preprocessor(sampled_states, train=not epoch)
 
                     _, next_log_prob, _ = self.policy.act(

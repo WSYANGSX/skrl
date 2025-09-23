@@ -76,76 +76,61 @@ PPO_ICM_DEFAULT_CONFIG = {
 
 
 class ICM(nn.Module):
-    """Intrinsic Curiosity Module (ICM) for generating intrinsic rewards"""
-
-    def __init__(
-        self,
-        observation_space: gymnasium.Space,
-        action_space: gymnasium.Space,
-        feature_dim: int = 256,
-        device: Union[str, torch.device] = "cpu",
-    ):
+    def __init__(self, observation_space, action_space, feature_dim=256, device="cpu"):
         super(ICM, self).__init__()
         self.device = device
         self.feature_dim = feature_dim
+        self.register_buffer("running_forward_error", torch.tensor(1.0))
 
-        # Feature encoding network (φ)
+        # 特征编码器
         self.feature_encoder = nn.Sequential(
-            nn.Linear(observation_space.shape[0], 256), nn.ReLU(), nn.Linear(256, feature_dim), nn.ReLU()
-        ).to(device)
+            nn.Linear(observation_space.shape[0], 256),
+            nn.ReLU(),
+            nn.Linear(256, feature_dim),
+        )
+        self.feature_norm = nn.LayerNorm(feature_dim)
 
-        # Inverse model: predicts action from current and next state features
+        # 逆模型和前向模型
         self.inverse_model = nn.Sequential(
             nn.Linear(feature_dim * 2, 256), nn.ReLU(), nn.Linear(256, action_space.shape[0])
-        ).to(device)
-
-        # Forward model: predicts next state feature from current state feature and action
+        )
         self.forward_model = nn.Sequential(
             nn.Linear(feature_dim + action_space.shape[0], 256), nn.ReLU(), nn.Linear(256, feature_dim)
-        ).to(device)
+        )
 
-    def forward(
-        self, states: torch.Tensor, next_states: torch.Tensor, actions: torch.Tensor
-    ) -> Dict[str, torch.Tensor]:
-        """Compute ICM components and intrinsic reward"""
-        # Encode states to features
-        phi_s = self.feature_encoder(states)
-        phi_s_next = self.feature_encoder(next_states)
+    def forward(self, states, next_states, actions):
+        # 编码和归一化特征
+        phi_s = self.feature_norm(self.feature_encoder(states))
+        phi_s_next = self.feature_norm(self.feature_encoder(next_states))
 
-        # Inverse model: predict action from state features
+        # 逆模型
         predicted_actions = self.inverse_model(torch.cat([phi_s, phi_s_next], dim=1))
 
-        # Forward model: predict next state feature
+        # 前向模型
         predicted_phi_s_next = self.forward_model(torch.cat([phi_s, actions], dim=1))
 
-        # Intrinsic reward: prediction error of forward model
-        intrinsic_reward = 0.5 * F.mse_loss(predicted_phi_s_next, phi_s_next.detach(), reduction="none").mean(
+        # 内在奖励（标准化）
+        forward_error = F.mse_loss(predicted_phi_s_next, phi_s_next.detach(), reduction="none").mean(
             dim=1, keepdim=True
         )
+
+        # 运行平均值标准化
+        self.running_forward_error = 0.99 * self.running_forward_error + 0.01 * forward_error.mean().detach()
+        intrinsic_reward = forward_error / (self.running_forward_error + 1e-8)
 
         return {
             "predicted_actions": predicted_actions,
             "predicted_phi_s_next": predicted_phi_s_next,
             "intrinsic_reward": intrinsic_reward,
+            "forward_error": forward_error,
             "phi_s": phi_s,
             "phi_s_next": phi_s_next,
         }
 
-    def compute_loss(
-        self,
-        states: torch.Tensor,
-        next_states: torch.Tensor,
-        actions: torch.Tensor,
-        forward_scale: float = 0.2,
-        inverse_scale: float = 0.8,
-    ) -> Dict[str, torch.Tensor]:
-        """Compute ICM losses"""
+    def compute_loss(self, states, next_states, actions, forward_scale=0.2, inverse_scale=0.8):
         outputs = self.forward(states, next_states, actions)
 
-        # Inverse loss: action prediction
         inverse_loss = F.mse_loss(outputs["predicted_actions"], actions)
-
-        # Forward loss: next state prediction
         forward_loss = F.mse_loss(outputs["predicted_phi_s_next"], outputs["phi_s_next"].detach())
 
         total_loss = inverse_scale * inverse_loss + forward_scale * forward_loss
@@ -155,6 +140,7 @@ class ICM(nn.Module):
             "inverse_loss": inverse_loss,
             "forward_loss": forward_loss,
             "intrinsic_reward": outputs["intrinsic_reward"],
+            "forward_error": outputs["forward_error"],
         }
 
 
