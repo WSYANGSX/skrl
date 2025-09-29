@@ -151,19 +151,19 @@ class PPO_FUN(Agent):
             self.checkpoint_modules["manager_optimizer"] = self.manager_optimizer
 
         if self.policy is not None and self.value is not None:
-            self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=self._learning_rate)
-            self.value_optimizer = torch.optim.Adam(self.value.parameters(), lr=self._learning_rate)
+            if self.policy is self.value:
+                self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self._learning_rate)
+            else:
+                self.optimizer = torch.optim.Adam(
+                    itertools.chain(self.policy.parameters(), self.value.parameters()), lr=self._learning_rate
+                )
 
             if self._learning_rate_scheduler is not None:
-                self.policy_scheduler = self._learning_rate_scheduler(
-                    self.policy_optimizer, **self.cfg["learning_rate_scheduler_kwargs"]
-                )
-                self.value_scheduler = self._learning_rate_scheduler(
-                    self.value_optimizer, **self.cfg["learning_rate_scheduler_kwargs"]
+                self.scheduler = self._learning_rate_scheduler(
+                    self.optimizer, **self.cfg["learning_rate_scheduler_kwargs"]
                 )
 
-            self.checkpoint_modules["policy_optimizer"] = self.policy_optimizer
-            self.checkpoint_modules["value_optimizer"] = self.value_optimizer
+            self.checkpoint_modules["optimizer"] = self.optimizer
 
         # set up preprocessors
         if self._state_preprocessor:
@@ -178,12 +178,11 @@ class PPO_FUN(Agent):
         else:
             self._value_preprocessor = self._empty_preprocessor
 
-        # internal state
         self._current_log_prob = None
         self._current_values = None
         self._current_next_states = None
         self._current_goal_embedding = None
-        self._manager_step_count = 0
+        self._manager_step_inited = False
         self._manager_states = []
         self._manager_goals = []
 
@@ -213,7 +212,7 @@ class PPO_FUN(Agent):
         self._current_values = None
         self._current_next_states = None
         self._current_goal_embedding = None
-        self._manager_step_count = 0
+        self._manager_step_inited = False
         self._manager_states = []
         self._manager_goals = []
 
@@ -224,13 +223,19 @@ class PPO_FUN(Agent):
             return self.policy.random_act({"states": self._state_preprocessor(states)}, role="policy")
 
         # manager generates new goal every manager_horizon steps
-        if self._manager_step_count % self._manager_horizon == 0:
-            with torch.no_grad():
-                goal_embedding, _, _ = self.manager.act({"states": self._state_preprocessor(states)})
-                self._current_goal_embedding = goal_embedding
-                # store for manager training
-                self._manager_states.append(states.clone())
-                self._manager_goals.append(goal_embedding.clone())
+        if not self._manager_step_inited:
+            goal_embedding, _, _ = self.manager.act({"states": self._state_preprocessor(states)})
+            self._current_goal_embedding = torch.zeros_like(goal_embedding)
+            self._manager_step_count = torch.zeros((len(goal_embedding),), device=self.device, dtype=torch.int32)
+            self._manager_step_inited = True
+
+        needs_new_goal = self._manager_step_count % self._manager_horizon == 0
+        if torch.any(needs_new_goal):
+            goal_embedding, _, _ = self.manager.act({"states": self._state_preprocessor(states)})
+            indices = needs_new_goal
+            self._current_goal_embedding[indices] = goal_embedding[indices]
+            self._manager_states.append(states[indices].clone())
+            self._manager_goals.append(goal_embedding[indices].clone())
 
         self._manager_step_count += 1
 
@@ -240,10 +245,6 @@ class PPO_FUN(Agent):
                 {"states": self._state_preprocessor(states), "goals": self._current_goal_embedding}, role="policy"
             )
             self._current_log_prob = log_prob
-
-            # get value estimate
-            values, _, _ = self.value.act({"states": self._state_preprocessor(states)}, role="value")
-            self._current_values = values
 
         return actions, log_prob, outputs
 
@@ -266,6 +267,11 @@ class PPO_FUN(Agent):
 
         if self.memory is not None:
             self._current_next_states = next_states
+
+            if self._manager_step_inited:
+                done = (terminated | truncated).squeeze()
+                if torch.any(done):
+                    self._manager_step_count[done] = 0
 
             # reward shaping
             if self._rewards_shaper is not None:
@@ -317,10 +323,6 @@ class PPO_FUN(Agent):
             self._update(timestep, timesteps)
             self.set_mode("eval")
 
-        # 移除重置逻辑 - manager 步数应该持续增长
-        # 或者通过其他机制在环境真正重置时处理
-
-        # 写入跟踪数据和检查点
         super().post_interaction(timestep, timesteps)
 
     def _update(self, timestep: int, timesteps: int) -> None:
@@ -393,6 +395,11 @@ class PPO_FUN(Agent):
         cumulative_value_loss = 0
         cumulative_manager_loss = 0
 
+        # Update manager network
+        if len(self._manager_states) > 0:
+            manager_loss = self._update_manager()
+            cumulative_manager_loss += manager_loss.item()
+
         # learning epochs
         for epoch in range(self._learning_epochs):
             kl_divergences = []
@@ -456,37 +463,25 @@ class PPO_FUN(Agent):
                     value_loss = self._value_loss_scale * F.mse_loss(sampled_returns, predicted_values)
 
                 # optimization step for policy
-                self.policy_optimizer.zero_grad()
+                self.optimizer.zero_grad()
                 self.scaler.scale(policy_loss + entropy_loss).backward()
 
                 if config.torch.is_distributed:
                     self.policy.reduce_parameters()
+                    if self.policy is not self.value:
+                        self.value.reduce_parameters()
 
                 if self._grad_norm_clip > 0:
-                    self.scaler.unscale_(self.policy_optimizer)
-                    nn.utils.clip_grad_norm_(self.policy.parameters(), self._grad_norm_clip)
+                    self.scaler.unscale_(self.optimizer)
+                    if self.policy is self.value:
+                        nn.utils.clip_grad_norm_(self.policy.parameters(), self._grad_norm_clip)
+                    else:
+                        nn.utils.clip_grad_norm_(
+                            itertools.chain(self.policy.parameters(), self.value.parameters()), self._grad_norm_clip
+                        )
 
-                self.scaler.step(self.policy_optimizer)
+                self.scaler.step(self.optimizer)
                 self.scaler.update()
-
-                # optimization step for value
-                self.value_optimizer.zero_grad()
-                self.scaler.scale(value_loss).backward()
-
-                if config.torch.is_distributed:
-                    self.value.reduce_parameters()
-
-                if self._grad_norm_clip > 0:
-                    self.scaler.unscale_(self.value_optimizer)
-                    nn.utils.clip_grad_norm_(self.value.parameters(), self._grad_norm_clip)
-
-                self.scaler.step(self.value_optimizer)
-                self.scaler.update()
-
-                # Update manager network
-                if len(self._manager_states) > 0:
-                    manager_loss = self._update_manager()
-                    cumulative_manager_loss += manager_loss.item()
 
                 # update cumulative losses
                 cumulative_policy_loss += policy_loss.item()
@@ -495,17 +490,16 @@ class PPO_FUN(Agent):
                     cumulative_entropy_loss += entropy_loss.item()
 
             # update learning rate
-            if self._learning_rate_scheduler and hasattr(self, "policy_scheduler"):
-                if isinstance(self.policy_scheduler, KLAdaptiveLR):
+            if self._learning_rate_scheduler:
+                if isinstance(self.scheduler, KLAdaptiveLR):
                     kl = torch.tensor(kl_divergences, device=self.device).mean()
+                    # reduce (collect from all workers/processes) KL in distributed runs
                     if config.torch.is_distributed:
                         torch.distributed.all_reduce(kl, op=torch.distributed.ReduceOp.SUM)
                         kl /= config.torch.world_size
-                    self.policy_scheduler.step(kl.item())
-                    self.value_scheduler.step(kl.item())
+                    self.scheduler.step(kl.item())
                 else:
-                    self.policy_scheduler.step()
-                    self.value_scheduler.step()
+                    self.scheduler.step()
 
         # record data
         self.track_data("Loss / Policy loss", cumulative_policy_loss / (self._learning_epochs * self._mini_batches))
@@ -521,8 +515,8 @@ class PPO_FUN(Agent):
 
         self.track_data("Policy / Standard deviation", self.policy.distribution(role="policy").stddev.mean().item())
 
-        if self._learning_rate_scheduler and hasattr(self, "policy_scheduler"):
-            self.track_data("Learning / Learning rate", self.policy_scheduler.get_last_lr()[0])
+        if self._learning_rate_scheduler:
+            self.track_data("Learning / Learning rate", self.scheduler.get_last_lr()[0])
 
         # reset manager buffers
         self._manager_states.clear()
@@ -573,6 +567,5 @@ class PPO_FUN(Agent):
                 getattr(model, mode)()
 
         if mode == "eval":
-            self._manager_step_count = 0
             self._manager_states.clear()
             self._manager_goals.clear()

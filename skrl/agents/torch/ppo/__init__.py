@@ -2,3 +2,4 @@ from skrl.agents.torch.ppo.ppo import PPO, PPO_DEFAULT_CONFIG
 from skrl.agents.torch.ppo.ppo_rnn import PPO_RNN
 from skrl.agents.torch.ppo.ppo_icm import PPO_ICM, PPO_ICM_DEFAULT_CONFIG
 from skrl.agents.torch.ppo.ppo_fun import PPO_FUN, PPO_FUN_DEFAULT_CONFIG
+from skrl.agents.torch.ppo.ppo_disagreement import PPODisagreement, PPO_DISAGREEMENT_DEFAULT_CONFIG

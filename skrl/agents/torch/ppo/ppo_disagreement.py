@@ -1,6 +1,6 @@
-from typing import Any, Mapping, Optional, Tuple, Union, Dict
-
+from typing import Any, Mapping, Optional, Tuple, Union, List
 import copy
+import itertools
 import gymnasium
 from packaging import version
 
@@ -12,163 +12,73 @@ from skrl import config, logger
 from skrl.agents.torch import Agent
 from skrl.memories.torch import Memory
 from skrl.models.torch import Model
-from skrl.resources.schedulers.torch import KLAdaptiveLR
+from skrl.resources.schedulers.torch import KLAdaptiveRL
 
-# fmt: off
-# [start-config-dict-torch]
-PPO_ICM_DEFAULT_CONFIG = {
-    "rollouts": 16,                 # number of rollouts before updating
-    "learning_epochs": 8,           # number of learning epochs during each update
-    "mini_batches": 2,              # number of mini batches during each learning epoch
-
-    "discount_factor": 0.99,        # discount factor (gamma)
-    "lambda": 0.95,                 # TD(lambda) coefficient (lam) for computing returns and advantages
-
-    "learning_rate": 1e-3,                  # learning rate
-    "learning_rate_scheduler": None,        # learning rate scheduler class (see torch.optim.lr_scheduler)
-    "learning_rate_scheduler_kwargs": {},   # learning rate scheduler's kwargs (e.g. {"step_size": 1e-3})
-
-    "state_preprocessor": None,             # state preprocessor class (see skrl.resources.preprocessors)
-    "state_preprocessor_kwargs": {},        # state preprocessor's kwargs (e.g. {"size": env.observation_space})
-    "value_preprocessor": None,             # value preprocessor class (see skrl.resources.preprocessors)
-    "value_preprocessor_kwargs": {},        # value preprocessor's kwargs (e.g. {"size": 1})
-
-    "random_timesteps": 0,          # random exploration steps
-    "learning_starts": 0,           # learning starts after this many steps
-
-    "grad_norm_clip": 0.5,              # clipping coefficient for the norm of the gradients
-    "ratio_clip": 0.2,                  # clipping coefficient for computing the clipped surrogate objective
-    "value_clip": 0.2,                  # clipping coefficient for computing the value loss (if clip_predicted_values is True)
-    "clip_predicted_values": False,     # clip predicted values during value loss computation
-
-    "entropy_loss_scale": 0.0,      # entropy loss scaling factor
-    "value_loss_scale": 1.0,        # value loss scaling factor
-
-    "kl_threshold": 0,              # KL divergence threshold for early stopping
-
-    "rewards_shaper": None,         # rewards shaping function: Callable(reward, timestep, timesteps) -> reward
+# [start-config-dict-torch-disagreement]
+PPO_DISAGREEMENT_DEFAULT_CONFIG = {
+    "rollouts": 16,  # number of rollouts before updating
+    "learning_epochs": 8,  # number of learning epochs during each update
+    "mini_batches": 2,  # number of mini batches during each learning epoch
+    "discount_factor": 0.99,  # discount factor (gamma)
+    "lambda": 0.95,  # TD(lambda) coefficient (lam) for computing returns and advantages
+    "learning_rate": 1e-3,  # learning rate
+    "learning_rate_scheduler": None,  # learning rate scheduler class (see torch.optim.lr_scheduler)
+    "learning_rate_scheduler_kwargs": {},  # learning rate scheduler's kwargs (e.g. {"step_size": 1e-3})
+    "state_preprocessor": None,  # state preprocessor class (see skrl.resources.preprocessors)
+    "state_preprocessor_kwargs": {},  # state preprocessor's kwargs (e.g. {"size": env.observation_space})
+    "value_preprocessor": None,  # value preprocessor class (see skrl.resources.preprocessors)
+    "value_preprocessor_kwargs": {},  # value preprocessor's kwargs (e.g. {"size": 1})
+    "random_timesteps": 0,  # random exploration steps
+    "learning_starts": 0,  # learning starts after this many steps
+    "grad_norm_clip": 0.5,  # clipping coefficient for the norm of the gradients
+    "ratio_clip": 0.2,  # clipping coefficient for computing the clipped surrogate objective
+    "value_clip": 0.2,  # clipping coefficient for computing the value loss (if clip_predicted_values is True)
+    "clip_predicted_values": False,  # clip predicted values during value loss computation
+    "entropy_loss_scale": 0.0,  # entropy loss scaling factor
+    "value_loss_scale": 1.0,  # value loss scaling factor
+    "kl_threshold": 0,  # KL divergence threshold for early stopping
+    "rewards_shaper": None,  # rewards shaping function: Callable(reward, timestep, timesteps) -> reward
     "time_limit_bootstrap": False,  # bootstrap at timeout termination (episode truncation)
-
-    "mixed_precision": False,       # enable automatic mixed precision for higher performance
-
-    # ICM specific parameters
-    "icm_enabled": False,           # whether to enable ICM
-    "icm_beta": 0.2,                # weight for intrinsic reward (β)
-    "icm_eta": 0.01,                # scaling factor for intrinsic reward (η)
-    "icm_forward_loss_scale": 0.2,  # scaling factor for forward model loss
-    "icm_inverse_loss_scale": 0.8,  # scaling factor for inverse model loss
-    "icm_feature_dim": 256,         # dimension of feature vector
-
+    "mixed_precision": False,  # enable automatic mixed precision for higher performance
+    # Disagreement algorithm specific parameters
+    "use_disagreement": True,  # enable disagreement intrinsic reward
+    "intrinsic_reward_scale": 0.1,  # scaling factor for intrinsic reward
+    "extrinsic_reward_scale": 1.0,  # scaling factor for extrinsic reward
+    "disagreement_ensemble_size": 5,  # number of dynamics models in ensemble
+    "dynamics_learning_rate": 1e-3,  # learning rate for dynamics models
+    "dynamics_update_freq": 1,  # update dynamics models every N policy updates
     "experiment": {
-        "directory": "",            # experiment's parent directory
-        "experiment_name": "",      # experiment name
-        "write_interval": "auto",   # TensorBoard writing interval (timesteps)
-
-        "checkpoint_interval": "auto",      # interval for checkpoints (timesteps)
-        "store_separately": False,          # whether to store checkpoints separately
-
-        "wandb": False,             # whether to use Weights & Biases
-        "wandb_kwargs": {}          # wandb kwargs (see https://docs.wandb.ai/ref/python/init)
-    }
+        "directory": "",  # experiment's parent directory
+        "experiment_name": "",  # experiment name
+        "write_interval": "auto",  # TensorBoard writing interval (timesteps)
+        "checkpoint_interval": "auto",  # interval for checkpoints (timesteps)
+        "store_separately": False,  # whether to store checkpoints separately
+        "wandb": False,  # whether to use Weights & Biases
+        "wandb_kwargs": {},  # wandb kwargs (see https://docs.wandb.ai/ref/python/init)
+    },
 }
-# [end-config-dict-torch]
-# fmt: on
+# [end-config-dict-torch-disagreement]
 
 
-class ICM(nn.Module):
-    def __init__(self, observation_space, action_space, feature_dim=256):
+class DisagreementDynamicsModel(nn.Module):
+    """Forward dynamics model for Disagreement algorithm"""
+
+    def __init__(self, observation_space: int, action_space: int, hidden_size: int = 256):
         super().__init__()
-        self.feature_dim = feature_dim
-        self.register_buffer("running_forward_error", torch.tensor(1.0))
-
-        self.is_discrete = not hasattr(action_space, "shape")
-        if self.is_discrete:
-            self.action_dim = action_space.n
-        else:
-            self.action_dim = action_space.shape[0]
-
-        self.feature_encoder = nn.Sequential(
-            nn.Linear(observation_space.shape[0], 512),
+        self.net = nn.Sequential(
+            nn.Linear(observation_space + action_space, hidden_size),
             nn.ReLU(),
-            nn.Linear(512, 256),
+            nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
-            nn.Linear(256, feature_dim),
-        )
-        self.feature_norm = nn.LayerNorm(feature_dim)
-
-        self.inverse_model = nn.Sequential(
-            nn.Linear(feature_dim * 2, 256), nn.ReLU(), nn.Linear(256, 128), nn.ReLU(), nn.Linear(128, self.action_dim)
+            nn.Linear(hidden_size, observation_space),
         )
 
-        self.forward_model = nn.Sequential(
-            nn.Linear(feature_dim + self.action_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, feature_dim),
-        )
-
-    def forward(self, states, next_states, actions):
-        phi_s = self.feature_encoder(states)
-
-        phi_s_next = self.feature_encoder(next_states)
-        if self.training and states.size(0) > 1:
-            phi_s = self.feature_norm(phi_s)
-            phi_s_next = self.feature_norm(phi_s_next)
-        else:
-            phi_s = F.normalize(phi_s, dim=1)
-            phi_s_next = F.normalize(phi_s_next, dim=1)
-
-        inverse_input = torch.cat([phi_s, phi_s_next], dim=1)
-        predicted_actions = self.inverse_model(inverse_input)
-
-        if self.is_discrete:
-            actions_onehot = F.one_hot(actions.long().squeeze(-1), self.action_dim).float()
-            forward_input = torch.cat([phi_s, actions_onehot], dim=1)
-        else:
-            forward_input = torch.cat([phi_s, actions], dim=1)
-
-        predicted_phi_s_next = self.forward_model(forward_input)
-
-        forward_error = F.mse_loss(predicted_phi_s_next, phi_s_next, reduction="none").mean(dim=1, keepdim=True)
-
-        self.running_forward_error = 0.99 * self.running_forward_error + 0.01 * forward_error.mean().detach()
-        self.running_forward_error = torch.clamp(self.running_forward_error, min=1e-8)
-
-        intrinsic_reward = forward_error / (self.running_forward_error + 1e-8)
-
-        return {
-            "predicted_actions": predicted_actions,
-            "predicted_phi_s_next": predicted_phi_s_next,
-            "intrinsic_reward": intrinsic_reward,
-            "forward_error": forward_error,
-            "phi_s": phi_s,
-            "phi_s_next": phi_s_next,
-        }
-
-    def compute_loss(self, states, next_states, actions, forward_scale=0.2, inverse_scale=0.8):
-        outputs = self.forward(states, next_states, actions)
-
-        if self.is_discrete:
-            action_target = actions.long().squeeze(-1) if actions.dim() > 1 else actions.long()
-            inverse_loss = F.cross_entropy(outputs["predicted_actions"], action_target)
-        else:
-            inverse_loss = F.mse_loss(outputs["predicted_actions"], actions)
-
-        forward_loss = F.mse_loss(outputs["predicted_phi_s_next"], outputs["phi_s_next"])
-
-        total_loss = inverse_scale * inverse_loss + forward_scale * forward_loss
-
-        return {
-            "total_loss": total_loss,
-            "inverse_loss": inverse_loss,
-            "forward_loss": forward_loss,
-            "intrinsic_reward": outputs["intrinsic_reward"],
-            "forward_error": outputs["forward_error"],
-        }
+    def forward(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        x = torch.cat([state, action], dim=-1)
+        return self.net(x)
 
 
-class PPO_ICM(Agent):
+class PPODisagreement(Agent):
     def __init__(
         self,
         models: Mapping[str, Model],
@@ -178,7 +88,29 @@ class PPO_ICM(Agent):
         device: Optional[Union[str, torch.device]] = None,
         cfg: Optional[dict] = None,
     ) -> None:
-        _cfg = copy.deepcopy(PPO_ICM_DEFAULT_CONFIG)
+        """Proximal Policy Optimization with Disagreement intrinsic reward
+
+        https://arxiv.org/abs/1906.04161
+
+        :param models: Models used by the agent
+        :type models: dictionary of skrl.models.torch.Model
+        :param memory: Memory to storage the transitions.
+                       If it is a tuple, the first element will be used for training and
+                       for the rest only the environment transitions will be added
+        :type memory: skrl.memory.torch.Memory, list of skrl.memory.torch.Memory or None
+        :param observation_space: Observation/state space or shape (default: ``None``)
+        :type observation_space: int, tuple or list of int, gymnasium.Space or None, optional
+        :param action_space: Action space or shape (default: ``None``)
+        :type action_space: int, tuple or list of int, gymnasium.Space or None, optional
+        :param device: Device on which a tensor/array is or will be allocated (default: ``None``).
+                       If None, the device will be either ``"cuda"`` if available or ``"cpu"``
+        :type device: str or torch.device, optional
+        :param cfg: Configuration dictionary
+        :type cfg: dict
+
+        :raises KeyError: If the models dictionary is missing a required key
+        """
+        _cfg = copy.deepcopy(PPO_DISAGREEMENT_DEFAULT_CONFIG)
         _cfg.update(cfg if cfg is not None else {})
         super().__init__(
             models=models,
@@ -193,16 +125,39 @@ class PPO_ICM(Agent):
         self.policy = self.models.get("policy", None)
         self.value = self.models.get("value", None)
 
-        # ICM module
-        self.icm_enabled = self.cfg["icm_enabled"]
-        if self.icm_enabled:
-            self.icm = ICM(observation_space, action_space, self.cfg["icm_feature_dim"])
-            self.icm.to(self.device)
-            self.checkpoint_modules["icm"] = self.icm
-
         # checkpoint models
         self.checkpoint_modules["policy"] = self.policy
         self.checkpoint_modules["value"] = self.value
+
+        # Disagreement specific components
+        self._use_disagreement = self.cfg["use_disagreement"]
+        self._intrinsic_reward_scale = self.cfg["intrinsic_reward_scale"]
+        self._extrinsic_reward_scale = self.cfg["extrinsic_reward_scale"]
+        self._ensemble_size = self.cfg["disagreement_ensemble_size"]
+        self._dynamics_update_freq = self.cfg["dynamics_update_freq"]
+
+        if self._use_disagreement:
+            # Create ensemble of dynamics models
+            self.dynamics_models = nn.ModuleList(
+                [
+                    DisagreementDynamicsModel(
+                        observation_space=self.observation_space[0]
+                        if isinstance(self.observation_space, tuple)
+                        else self.observation_space,
+                        action_space=self.action_space[0]
+                        if isinstance(self.action_space, tuple)
+                        else self.action_space,
+                    ).to(self.device)
+                    for _ in range(self._ensemble_size)
+                ]
+            )
+
+            self.dynamics_optimizers = [
+                torch.optim.Adam(model.parameters(), lr=self.cfg["dynamics_learning_rate"])
+                for model in self.dynamics_models
+            ]
+
+            self.checkpoint_modules["dynamics_models"] = self.dynamics_models
 
         # broadcast models' parameters in distributed runs
         if config.torch.is_distributed:
@@ -211,6 +166,9 @@ class PPO_ICM(Agent):
                 self.policy.broadcast_parameters()
                 if self.value is not None and self.policy is not self.value:
                     self.value.broadcast_parameters()
+            if self._use_disagreement:
+                for model in self.dynamics_models:
+                    model.broadcast_parameters()
 
         # configuration
         self._learning_epochs = self.cfg["learning_epochs"]
@@ -245,12 +203,6 @@ class PPO_ICM(Agent):
 
         self._mixed_precision = self.cfg["mixed_precision"]
 
-        # ICM parameters
-        self._icm_beta = self.cfg["icm_beta"]
-        self._icm_eta = self.cfg["icm_eta"]
-        self._icm_forward_loss_scale = self.cfg["icm_forward_loss_scale"]
-        self._icm_inverse_loss_scale = self.cfg["icm_inverse_loss_scale"]
-
         # set up automatic mixed precision
         self._device_type = torch.device(device).type
         if version.parse(torch.__version__) >= version.parse("2.4"):
@@ -260,19 +212,12 @@ class PPO_ICM(Agent):
 
         # set up optimizer and learning rate scheduler
         if self.policy is not None and self.value is not None:
-            params = []
             if self.policy is self.value:
-                params.extend(self.policy.parameters())
+                self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self._learning_rate)
             else:
-                params.extend(self.policy.parameters())
-                params.extend(self.value.parameters())
-
-            # Add ICM parameters if enabled
-            if self.icm_enabled:
-                params.extend(self.icm.parameters())
-
-            self.optimizer = torch.optim.Adam(params, lr=self._learning_rate)
-
+                self.optimizer = torch.optim.Adam(
+                    itertools.chain(self.policy.parameters(), self.value.parameters()), lr=self._learning_rate
+                )
             if self._learning_rate_scheduler is not None:
                 self.scheduler = self._learning_rate_scheduler(
                     self.optimizer, **self.cfg["learning_rate_scheduler_kwargs"]
@@ -293,6 +238,10 @@ class PPO_ICM(Agent):
         else:
             self._value_preprocessor = self._empty_preprocessor
 
+        # disagreement specific tracking
+        self._dynamics_update_count = 0
+        self._current_intrinsic_reward = None
+
     def init(self, trainer_cfg: Optional[Mapping[str, Any]] = None) -> None:
         """Initialize the agent"""
         super().init(trainer_cfg=trainer_cfg)
@@ -301,10 +250,9 @@ class PPO_ICM(Agent):
         # create tensors in memory
         if self.memory is not None:
             self.memory.create_tensor(name="states", size=self.observation_space, dtype=torch.float32)
-            self.memory.create_tensor(name="next_states", size=self.observation_space, dtype=torch.float32)
             self.memory.create_tensor(name="actions", size=self.action_space, dtype=torch.float32)
             self.memory.create_tensor(name="rewards", size=1, dtype=torch.float32)
-            self.memory.create_tensor(name="intrinsic_rewards", size=1, dtype=torch.float32)
+            self.memory.create_tensor(name="next_states", size=self.observation_space, dtype=torch.float32)
             self.memory.create_tensor(name="terminated", size=1, dtype=torch.bool)
             self.memory.create_tensor(name="truncated", size=1, dtype=torch.bool)
             self.memory.create_tensor(name="log_prob", size=1, dtype=torch.float32)
@@ -312,14 +260,66 @@ class PPO_ICM(Agent):
             self.memory.create_tensor(name="returns", size=1, dtype=torch.float32)
             self.memory.create_tensor(name="advantages", size=1, dtype=torch.float32)
 
+            if self._use_disagreement:
+                self.memory.create_tensor(name="intrinsic_rewards", size=1, dtype=torch.float32)
+                self.memory.create_tensor(name="extrinsic_rewards", size=1, dtype=torch.float32)
+
             # tensors sampled during training
             self._tensors_names = ["states", "actions", "log_prob", "values", "returns", "advantages"]
-            if self.icm_enabled:
-                self._tensors_names.extend(["next_states", "intrinsic_rewards"])
 
         # create temporary variables needed for storage and computation
         self._current_log_prob = None
         self._current_next_states = None
+
+    def _compute_intrinsic_reward(
+        self, states: torch.Tensor, actions: torch.Tensor, next_states: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute intrinsic reward based on disagreement between dynamics models"""
+        if not self._use_disagreement:
+            return torch.zeros(states.shape[0], 1, device=self.device)
+
+        with torch.no_grad(), torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
+            # Get predictions from all dynamics models
+            predictions = []
+            for model in self.dynamics_models:
+                pred_next_state = model(states, actions)
+                predictions.append(pred_next_state.unsqueeze(1))  # [batch_size, 1, state_dim]
+
+            # Stack predictions: [batch_size, ensemble_size, state_dim]
+            predictions = torch.cat(predictions, dim=1)
+
+            # Compute variance across ensemble (disagreement)
+            variance = torch.var(predictions, dim=1)  # [batch_size, state_dim]
+
+            # Intrinsic reward is the mean variance across state dimensions
+            intrinsic_reward = torch.mean(variance, dim=-1, keepdim=True)  # [batch_size, 1]
+
+            return intrinsic_reward * self._intrinsic_reward_scale
+
+    def _update_dynamics_models(self, states: torch.Tensor, actions: torch.Tensor, next_states: torch.Tensor) -> None:
+        """Update the ensemble of dynamics models"""
+        if not self._use_disagreement:
+            return
+
+        self._dynamics_update_count += 1
+
+        # Only update dynamics models every N policy updates
+        if self._dynamics_update_count % self._dynamics_update_freq != 0:
+            return
+
+        for model, optimizer in zip(self.dynamics_models, self.dynamics_optimizers):
+            model.train()
+
+            with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
+                pred_next_states = model(states, actions)
+                dynamics_loss = F.mse_loss(pred_next_states, next_states)
+
+            optimizer.zero_grad()
+            self.scaler.scale(dynamics_loss).backward()
+            self.scaler.step(optimizer)
+            self.scaler.update()
+
+            model.eval()
 
     def act(self, states: torch.Tensor, timestep: int, timesteps: int) -> torch.Tensor:
         """Process the environment's states to make a decision (actions) using the main policy"""
@@ -354,6 +354,17 @@ class PPO_ICM(Agent):
         if self.memory is not None:
             self._current_next_states = next_states
 
+            # compute intrinsic reward if using disagreement
+            intrinsic_reward = torch.zeros_like(rewards)
+            extrinsic_reward = rewards.clone()
+
+            if self._use_disagreement:
+                intrinsic_reward = self._compute_intrinsic_reward(states, actions, next_states)
+                self._current_intrinsic_reward = intrinsic_reward.mean().item()
+
+                # Combine extrinsic and intrinsic rewards
+                rewards = self._extrinsic_reward_scale * extrinsic_reward + intrinsic_reward
+
             # reward shaping
             if self._rewards_shaper is not None:
                 rewards = self._rewards_shaper(rewards, timestep, timesteps)
@@ -363,46 +374,29 @@ class PPO_ICM(Agent):
                 values, _, _ = self.value.act({"states": self._state_preprocessor(states)}, role="value")
                 values = self._value_preprocessor(values, inverse=True)
 
-            # compute intrinsic reward if ICM is enabled
-            intrinsic_rewards = torch.zeros_like(rewards)
-            if self.icm_enabled:
-                with torch.no_grad():
-                    icm_outputs = self.icm(
-                        self._state_preprocessor(states), self._state_preprocessor(next_states), actions
-                    )
-                    intrinsic_rewards = self._icm_eta * icm_outputs["intrinsic_reward"]
-
             # time-limit (truncation) bootstrapping
             if self._time_limit_bootstrap:
                 rewards += self._discount_factor * values * truncated
 
-            # combine extrinsic and intrinsic rewards
-            total_rewards = rewards + self._icm_beta * intrinsic_rewards
-
             # storage transition in memory
-            self.memory.add_samples(
-                states=states,
-                next_states=next_states,
-                actions=actions,
-                rewards=total_rewards,
-                intrinsic_rewards=intrinsic_rewards,
-                terminated=terminated,
-                truncated=truncated,
-                log_prob=self._current_log_prob,
-                values=values,
-            )
+            memory_data = {
+                "states": states,
+                "actions": actions,
+                "rewards": rewards,
+                "next_states": next_states,
+                "terminated": terminated,
+                "truncated": truncated,
+                "log_prob": self._current_log_prob,
+                "values": values,
+            }
+
+            if self._use_disagreement:
+                memory_data["intrinsic_rewards"] = intrinsic_reward
+                memory_data["extrinsic_rewards"] = extrinsic_reward
+
+            self.memory.add_samples(**memory_data)
             for memory in self.secondary_memories:
-                memory.add_samples(
-                    states=states,
-                    next_states=next_states,
-                    actions=actions,
-                    rewards=total_rewards,
-                    intrinsic_rewards=intrinsic_rewards,
-                    terminated=terminated,
-                    truncated=truncated,
-                    log_prob=self._current_log_prob,
-                    values=values,
-                )
+                memory.add_samples(**memory_data)
 
     def pre_interaction(self, timestep: int, timesteps: int) -> None:
         """Callback called before the interaction with the environment"""
@@ -429,8 +423,7 @@ class PPO_ICM(Agent):
             next_values: torch.Tensor,
             discount_factor: float = 0.99,
             lambda_coefficient: float = 0.95,
-        ) -> torch.Tensor:
-            """Compute the Generalized Advantage Estimator (GAE)"""
+        ) -> Tuple[torch.Tensor, torch.Tensor]:
             advantage = 0
             advantages = torch.zeros_like(rewards)
             not_dones = dones.logical_not()
@@ -452,6 +445,13 @@ class PPO_ICM(Agent):
 
             return returns, advantages
 
+        # Update dynamics models if using disagreement
+        if self._use_disagreement and self.memory is not None:
+            states = self.memory.get_tensor_by_name("states")
+            actions = self.memory.get_tensor_by_name("actions")
+            next_states = self.memory.get_tensor_by_name("next_states")
+            self._update_dynamics_models(states, actions, next_states)
+
         # compute returns and advantages
         with torch.no_grad(), torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
             self.value.train(False)
@@ -462,10 +462,8 @@ class PPO_ICM(Agent):
             last_values = self._value_preprocessor(last_values, inverse=True)
 
         values = self.memory.get_tensor_by_name("values")
-        rewards = self.memory.get_tensor_by_name("rewards")
-
         returns, advantages = compute_gae(
-            rewards=rewards,
+            rewards=self.memory.get_tensor_by_name("rewards"),
             dones=self.memory.get_tensor_by_name("terminated") | self.memory.get_tensor_by_name("truncated"),
             values=values,
             next_values=last_values,
@@ -483,44 +481,25 @@ class PPO_ICM(Agent):
         cumulative_policy_loss = 0
         cumulative_entropy_loss = 0
         cumulative_value_loss = 0
-        cumulative_icm_loss = 0
-
-        if self.icm_enabled:
-            intrinsic_rewards_all = self.memory.get_tensor_by_name("intrinsic_rewards")
-            extrinsic_rewards_all = rewards - self._icm_beta * intrinsic_rewards_all
 
         # learning epochs
         for epoch in range(self._learning_epochs):
             kl_divergences = []
 
             # mini-batches loop
-            for batch in sampled_batches:
-                if self.icm_enabled:
-                    (
-                        sampled_states,
-                        sampled_actions,
-                        sampled_log_prob,
-                        sampled_values,
-                        sampled_returns,
-                        sampled_advantages,
-                        sampled_next_states,
-                        sampled_intrinsic_rewards,
-                    ) = batch
-                else:
-                    (
-                        sampled_states,
-                        sampled_actions,
-                        sampled_log_prob,
-                        sampled_values,
-                        sampled_returns,
-                        sampled_advantages,
-                    ) = batch
-
+            for (
+                sampled_states,
+                sampled_actions,
+                sampled_log_prob,
+                sampled_values,
+                sampled_returns,
+                sampled_advantages,
+            ) in sampled_batches:
                 with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
-                    sampled_states_preprocessed = self._state_preprocessor(sampled_states, train=not epoch)
+                    sampled_states = self._state_preprocessor(sampled_states, train=not epoch)
 
                     _, next_log_prob, _ = self.policy.act(
-                        {"states": sampled_states_preprocessed, "taken_actions": sampled_actions}, role="policy"
+                        {"states": sampled_states, "taken_actions": sampled_actions}, role="policy"
                     )
 
                     # compute approximate KL divergence
@@ -549,7 +528,7 @@ class PPO_ICM(Agent):
                     policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
 
                     # compute value loss
-                    predicted_values, _, _ = self.value.act({"states": sampled_states_preprocessed}, role="value")
+                    predicted_values, _, _ = self.value.act({"states": sampled_states}, role="value")
 
                     if self._clip_predicted_values:
                         predicted_values = sampled_values + torch.clip(
@@ -557,28 +536,9 @@ class PPO_ICM(Agent):
                         )
                     value_loss = self._value_loss_scale * F.mse_loss(sampled_returns, predicted_values)
 
-                    # compute ICM loss if enabled
-                    icm_loss = 0
-                    if self.icm_enabled:
-                        sampled_next_states_preprocessed = self._state_preprocessor(
-                            sampled_next_states, train=not epoch
-                        )
-                        icm_losses = self.icm.compute_loss(
-                            sampled_states_preprocessed,
-                            sampled_next_states_preprocessed,
-                            sampled_actions,
-                            self._icm_forward_loss_scale,
-                            self._icm_inverse_loss_scale,
-                        )
-                        icm_loss = icm_losses["total_loss"]
-
                 # optimization step
                 self.optimizer.zero_grad()
-                total_loss = policy_loss + entropy_loss + value_loss
-                if self.icm_enabled:
-                    total_loss += icm_loss
-
-                self.scaler.scale(total_loss).backward()
+                self.scaler.scale(policy_loss + entropy_loss + value_loss).backward()
 
                 if config.torch.is_distributed:
                     self.policy.reduce_parameters()
@@ -587,16 +547,12 @@ class PPO_ICM(Agent):
 
                 if self._grad_norm_clip > 0:
                     self.scaler.unscale_(self.optimizer)
-                    params = []
                     if self.policy is self.value:
-                        params.extend(self.policy.parameters())
+                        nn.utils.clip_grad_norm_(self.policy.parameters(), self._grad_norm_clip)
                     else:
-                        params.extend(self.policy.parameters())
-                        params.extend(self.value.parameters())
-                    if self.icm_enabled:
-                        params.extend(self.icm.parameters())
-
-                    nn.utils.clip_grad_norm_(params, self._grad_norm_clip)
+                        nn.utils.clip_grad_norm_(
+                            itertools.chain(self.policy.parameters(), self.value.parameters()), self._grad_norm_clip
+                        )
 
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -606,8 +562,6 @@ class PPO_ICM(Agent):
                 cumulative_value_loss += value_loss.item()
                 if self._entropy_loss_scale:
                     cumulative_entropy_loss += entropy_loss.item()
-                if self.icm_enabled:
-                    cumulative_icm_loss += icm_loss.item()
 
             # update learning rate
             if self._learning_rate_scheduler:
@@ -628,15 +582,23 @@ class PPO_ICM(Agent):
             self.track_data(
                 "Loss / Entropy loss", cumulative_entropy_loss / (self._learning_epochs * self._mini_batches)
             )
-        if self.icm_enabled:
-            self.track_data("Loss / ICM loss", cumulative_icm_loss / (self._learning_epochs * self._mini_batches))
-            self.track_data("Reward / Intrinsic", intrinsic_rewards_all.mean().item())
-            self.track_data("Reward / Extrinsic", extrinsic_rewards_all.mean().item())
-            self.track_data("ICM / Forward Loss", icm_losses["forward_loss"].item())
-            self.track_data("ICM / Inverse Loss", icm_losses["inverse_loss"].item())
-            self.track_data("ICM / Running Forward Error", self.icm.running_forward_error.item())
 
         self.track_data("Policy / Standard deviation", self.policy.distribution(role="policy").stddev.mean().item())
 
         if self._learning_rate_scheduler:
             self.track_data("Learning / Learning rate", self.scheduler.get_last_lr()[0])
+
+        # Track disagreement-specific metrics
+        if self._use_disagreement:
+            if hasattr(self, "_current_intrinsic_reward"):
+                self.track_data("Reward / Intrinsic", self._current_intrinsic_reward)
+
+            # Track extrinsic reward from memory if available
+            if self.memory.has_tensor("extrinsic_rewards"):
+                extrinsic_rewards = self.memory.get_tensor_by_name("extrinsic_rewards")
+                self.track_data("Reward / Extrinsic", extrinsic_rewards.mean().item())
+
+            # Track total reward
+            if self.memory.has_tensor("rewards"):
+                total_rewards = self.memory.get_tensor_by_name("rewards")
+                self.track_data("Reward / Total", total_rewards.mean().item())
