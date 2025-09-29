@@ -1,4 +1,4 @@
-from typing import Any, Mapping, Optional, Tuple, Union, List
+from typing import Any, Mapping, Optional, Tuple, Union
 import copy
 import itertools
 import gymnasium
@@ -13,6 +13,7 @@ from skrl.agents.torch import Agent
 from skrl.memories.torch import Memory
 from skrl.models.torch import Model
 from skrl.resources.schedulers.torch import KLAdaptiveRL
+from skrl.utils.spaces.torch import compute_space_size
 
 # [start-config-dict-torch-disagreement]
 PPO_DISAGREEMENT_DEFAULT_CONFIG = {
@@ -22,8 +23,11 @@ PPO_DISAGREEMENT_DEFAULT_CONFIG = {
     "discount_factor": 0.99,  # discount factor (gamma)
     "lambda": 0.95,  # TD(lambda) coefficient (lam) for computing returns and advantages
     "learning_rate": 1e-3,  # learning rate
-    "learning_rate_scheduler": None,  # learning rate scheduler class (see torch.optim.lr_scheduler)
-    "learning_rate_scheduler_kwargs": {},  # learning rate scheduler's kwargs (e.g. {"step_size": 1e-3})
+    "learning_rate_scheduler": KLAdaptiveRL,  # learning rate scheduler class (see torch.optim.lr_scheduler)
+    "learning_rate_scheduler_kwargs": {
+        "kl_threshold": 0.01,
+        "min_lr": 1e-5,
+    },  # learning rate scheduler's kwargs (e.g. {"step_size": 1e-3})
     "state_preprocessor": None,  # state preprocessor class (see skrl.resources.preprocessors)
     "state_preprocessor_kwargs": {},  # state preprocessor's kwargs (e.g. {"size": env.observation_space})
     "value_preprocessor": None,  # value preprocessor class (see skrl.resources.preprocessors)
@@ -141,12 +145,8 @@ class PPODisagreement(Agent):
             self.dynamics_models = nn.ModuleList(
                 [
                     DisagreementDynamicsModel(
-                        observation_space=self.observation_space[0]
-                        if isinstance(self.observation_space, tuple)
-                        else self.observation_space,
-                        action_space=self.action_space[0]
-                        if isinstance(self.action_space, tuple)
-                        else self.action_space,
+                        observation_space=compute_space_size(self.observation_space),
+                        action_space=compute_space_size(self.action_space),
                     ).to(self.device)
                     for _ in range(self._ensemble_size)
                 ]
@@ -565,7 +565,7 @@ class PPODisagreement(Agent):
 
             # update learning rate
             if self._learning_rate_scheduler:
-                if isinstance(self.scheduler, KLAdaptiveLR):
+                if isinstance(self.scheduler, KLAdaptiveRL):
                     kl = torch.tensor(kl_divergences, device=self.device).mean()
                     # reduce (collect from all workers/processes) KL in distributed runs
                     if config.torch.is_distributed:
@@ -593,12 +593,8 @@ class PPODisagreement(Agent):
             if hasattr(self, "_current_intrinsic_reward"):
                 self.track_data("Reward / Intrinsic", self._current_intrinsic_reward)
 
-            # Track extrinsic reward from memory if available
-            if self.memory.has_tensor("extrinsic_rewards"):
-                extrinsic_rewards = self.memory.get_tensor_by_name("extrinsic_rewards")
-                self.track_data("Reward / Extrinsic", extrinsic_rewards.mean().item())
+            extrinsic_rewards = self.memory.get_tensor_by_name("extrinsic_rewards")
+            self.track_data("Reward / Extrinsic", extrinsic_rewards.mean().item())
 
-            # Track total reward
-            if self.memory.has_tensor("rewards"):
-                total_rewards = self.memory.get_tensor_by_name("rewards")
-                self.track_data("Reward / Total", total_rewards.mean().item())
+            total_rewards = self.memory.get_tensor_by_name("rewards")
+            self.track_data("Reward / Total", total_rewards.mean().item())
